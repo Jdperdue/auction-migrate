@@ -211,38 +211,85 @@ setting up large auctions.
 
 ## Client Data
 
-### Commission Structure (`c_client_data`, `c_indiv_commissions`)
+### Commission Structure (`g_commission_classes`, `c_indiv_commissions`) — CLOSED
 ```
-comm_class_id1       (primary commission class)
-comm_class_id2       (secondary commission class)
-comm_cap             decimal (commission cap)
-indiv_comm_id        (individual commission rate)
-rate                 float (in c_indiv_commissions)
-recipient            varchar
+comm_class_id   (per lot, on {NNN}_inventory)
+com_rate        float  (g_commission_classes)
+rate            float  (c_indiv_commissions, keyed by free-text recipient name)
 ```
-René Bates tracks commission rates owed back to clients/consignors —
-the seller's side of the transaction. Our schema only tracks buyer's
-premium (buyer pays). Seller commission is the other half of the
-economics.
-
-**Recommendation:** Significant v2 feature for operators who need to
-manage seller-side commission reporting. Add `clients.commission_rate`,
-`clients.commission_cap` and a `client_commission_classes` table.
-Consignor commissions (individual rates) are an additional layer on top.
+No longer a gap — `clients.commission_rate`/`commission_cap` shipped on
+the target 2026-07-04. Migration step `19_ClientCommissions` sets a
+default `commission_rate` per client from their most-frequent
+`comm_class_id` across historical lots. This is a best-effort inferred
+default, not authoritative: the source assigns commission per lot, not
+per client, and `c_indiv_commissions` can't be joined to any client (its
+`recipient` column is free text like `"David Dean SEE NOTES"`).
+`commission_cap` has no source analog and is left NULL. See
+`migration-renebates.md` for the full mapping.
 
 ---
 
-### Tax Classes (`c_client_data`, `g_tax_classes`)
+### Tax Classes (`g_tax_classes`) — CLOSED
 ```
-tax_class_id    (per client, per lot)
+tax_class_id    (per lot, on {NNN}_inventory)
 ```
-Tax classification applied to lots — determines whether buyer pays
-sales tax and at what rate. Our schema has no tax handling.
+No longer a gap — `tax_jurisdictions` and `lots.tax_jurisdiction_id`
+shipped on the target 2026-07-04. Migration step `17_TaxJurisdictions`
+seeds one `tax_jurisdictions` row per distinct source tax class and
+sets `lots.tax_jurisdiction_id` directly from `tax_class_id` — a clean
+FK-for-FK swap, no inference needed.
 
-**Recommendation:** Notable gap for operators in jurisdictions that
-require sales tax on auction purchases. Add to v2 as `tax_classes`
-table with `lots.tax_class_id`. Not required for all operators but
-important for municipal auctions in tax-collecting states.
+---
+
+### Consignors (`c_consignors`) — CLOSED
+```
+ID          (526 rows)
+client_id
+description
+```
+No longer a gap — `consignors` and `lots.consignor_id` shipped on the
+target 2026-07-04. Migration step `18_Consignors` migrates
+`c_consignors` 1:1 (same shape as step 03 Clients — source IDs
+preserved, no remapping) and sets `lots.consignor_id` from each lot's
+`consignor_id`.
+
+---
+
+### Vehicle Details (free text in `{NNN}_inventory.description`) — CLOSED
+```
+"2020 Chevrolet Express Van; VIN 1GAZGNFP3L1255690; 347,793 Miles
+ showing; 4.3L Gas; Auto; ..."
+```
+No longer a gap — `lot_vehicle_details` shipped on the target
+2026-07-11. Descriptions follow a semi-consistent semicolon-delimited
+format for actual vehicle lots (not all lots are vehicles — the same
+tables hold livestock and equipment too). Migration step
+`20_LotVehicleDetails` gates on finding a VIN-shaped token before
+parsing make/model/year/mileage/fuel/transmission out of the text.
+`title_status` comes from `disclosure_id` → `a_disclosures` instead of
+the free text, since that's the more reliable of the two sources for
+that one field.
+
+---
+
+### Client Logos (filesystem, not DB)
+```
+/var/www/logos/logo_{client_id:%06d}.jpg   (flat dir, 1,042 files)
+```
+Not a schema gap — `clients.logo_path` already exists on both sides (the
+target added it for the client-logo card feature; the source derives the
+path from `c_clients.ID` at request time in `admin/clients.php` rather
+than storing it in a column). Unlike lot images, `clients.id` is
+preserved 1:1 from `c_clients.ID`, so there's no ID-remapping problem
+here — just a per-client existence check and file copy.
+
+**Recommendation:** Add migration step `16_ClientLogos`, after
+`03_Clients`. For each client, check
+`SOURCE_LOGOS_DIR/logo_{id:%06d}.jpg`; if present, copy to
+`TARGET_STORAGE_DIR/clients/{id}/logo.jpg` and set `clients.logo_path`.
+No landing-place gap, no priority ranking needed — this is an
+implementation task, not a v2 feature decision. See
+`migration-renebates.md` § Clients for the full mapping.
 
 ---
 
@@ -275,7 +322,9 @@ CRM or document management tool. Discard.
 | Auction images | `a_live_auctions` | Medium | Add `auction_images` table |
 | Closing time display | `a_auctions` | Low | Add `closing_time_display` to `auctions` |
 | Stagger templates | `a_staggered_ends` | Low | UI convenience feature — no data to migrate |
-| Seller commissions | `c_client_data` | Medium | Add commission fields to `clients` |
-| Tax classes | `g_tax_classes` | Medium | Add `tax_classes` table + lot FK |
+| Seller commissions | `g_commission_classes` | Closed | Schema shipped 07-04; step `19_ClientCommissions` (inferred default) |
+| Tax classes | `g_tax_classes` | Closed | Schema shipped 07-04; step `17_TaxJurisdictions` (clean FK swap) |
+| Consignors | `c_consignors` | Closed | Schema shipped 07-04; step `18_Consignors` (1:1, preserved IDs) |
+| Vehicle details | `{NNN}_inventory.description` | Closed | Schema shipped 07-11; step `20_LotVehicleDetails` (VIN-gated parse) |
 | Auction refresh rate | `a_auctions` | None | Obsolete — replaced by WebSocket |
 | Contracts | `c_contracts` | None | Out of scope — CRM concern |

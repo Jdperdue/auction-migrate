@@ -14,6 +14,12 @@ declare(strict_types=1);
  * (lowercase filename => actual on-disk filename) and matched case-
  * insensitively. Thumbnail files (T_ prefix) are never copied — the target
  * app has no thumbnail concept.
+ *
+ * Ends with a coverage validation pass: re-checks every lot_images row
+ * against the filesystem and logs the count of distinct lots with zero
+ * resolved photos — the actionable number (a lot missing 1 of 6 photos is
+ * fine; missing all 6 isn't), surfaced as a clear summary instead of a
+ * scattered per-file skip count in the log.
  */
 class Step13LotPhotos implements StepInterface
 {
@@ -66,7 +72,65 @@ class Step13LotPhotos implements StepInterface
 
         $this->logger->info("LotPhotos: {$result->processed} processed, {$result->inserted} copied, {$result->skipped} skipped.");
 
+        $this->verifyPhotoCoverage($target, $targetStorageDir, $dryRun);
+
         return $result;
+    }
+
+    /**
+     * Re-checks every lot_images row for this tenant against the filesystem
+     * and reports the count of distinct lots with zero resolved photos. In
+     * dry-run mode this reflects pre-copy state (a preview of the gap);
+     * in a live run it reflects what actually landed on disk.
+     */
+    private function verifyPhotoCoverage(PDO $target, string $targetStorageDir, bool $dryRun): void
+    {
+        $totalLotsStmt = $target->prepare('SELECT COUNT(*) FROM lots WHERE tenant_id = :tenant_id');
+        $totalLotsStmt->execute(['tenant_id' => $this->config->tenantId]);
+        $totalLots = (int) $totalLotsStmt->fetchColumn();
+
+        $stmt = $target->prepare(
+            'SELECT li.lot_id AS lot_id, li.path AS path
+             FROM lot_images li
+             JOIN lots l ON l.id = li.lot_id
+             WHERE l.tenant_id = :tenant_id'
+        );
+        $stmt->execute(['tenant_id' => $this->config->tenantId]);
+
+        $totalRows = 0;
+        $resolvedRows = 0;
+        $lotsSeen = [];
+        $lotsResolved = [];
+
+        foreach ($stmt->fetchAll() as $row) {
+            $totalRows++;
+            $lotId = (int) $row['lot_id'];
+            $lotsSeen[$lotId] = true;
+
+            if (is_file("{$targetStorageDir}/{$row['path']}")) {
+                $resolvedRows++;
+                $lotsResolved[$lotId] = true;
+            }
+        }
+
+        $lotsWithNoImageRows = $totalLots - count($lotsSeen);
+        $lotsWithAllUnresolved = count($lotsSeen) - count($lotsResolved);
+        $lotsWithZeroPhotos = $lotsWithNoImageRows + $lotsWithAllUnresolved;
+        $mode = $dryRun ? 'pre-copy' : 'post-copy';
+
+        $this->logger->info(
+            "Photo coverage ({$mode}): {$resolvedRows}/{$totalRows} lot_images row(s) resolve to a real file; "
+            . count($lotsResolved) . "/{$totalLots} lot(s) have at least one working photo."
+        );
+
+        if ($lotsWithZeroPhotos > 0) {
+            $this->logger->warn(
+                "Photo coverage: {$lotsWithZeroPhotos} of {$totalLots} lot(s) have ZERO working photos "
+                . "({$lotsWithNoImageRows} with no lot_images row at all, {$lotsWithAllUnresolved} whose "
+                . 'images all failed to resolve) — their source files were not found under SOURCE_PHOTOS_DIR. '
+                . 'Review the per-image skip warnings above and confirm against the source bates folders.'
+            );
+        }
     }
 
     private function processImage(

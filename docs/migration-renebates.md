@@ -111,6 +111,23 @@ g_states.abbreviation (joined)  → clients.state
                                    clients.tenant_id = {renebates_tenant_id}
                                    clients.is_self_serve = false
                                    clients.status = active
+
+Logo:
+  No DB column stores the logo reference — the source app derives the
+  path from the client ID at request time (admin/clients.php,
+  admin/client/rmlogo.php): SOURCE_LOGOS_DIR/logo_{client_id:%06d}.jpg
+  (confirmed on-disk at /var/www/logos/, flat directory, 1,042 files
+  against 1,936 c_clients rows — most clients have none, matching this
+  app's fallback-icon design). Since clients.id is preserved 1:1 from
+  c_clients.ID (no remapping, unlike lots), the copy is a direct
+  existence check per client — no source→target ID map needed:
+    for each client: if SOURCE_LOGOS_DIR/logo_{id:%06d}.jpg exists,
+    copy to TARGET_STORAGE_DIR/clients/{id}/logo.jpg and set
+    clients.logo_path = "clients/{id}/logo.jpg"; otherwise leave
+    logo_path null (app-side accessor falls back to the platform
+    auctioneer-figure icon).
+  Implemented as migration step 16_ClientLogos, after 03_Clients so
+  client rows exist to check against.
 ```
 
 ---
@@ -379,6 +396,48 @@ gn.created      → bidder_notes.created_at
 gn.creator      → (if 'admin' or 'auction' → author_id = migration system user)
                    bidder_notes.tenant_id = {renebates_tenant_id}
                    bidder_notes.is_flagged = false
+```
+
+---
+
+### 11. Schema drift additions (steps 17-20)
+
+Added 2026-07-24 to close gaps opened by Laravel migrations that landed
+on the target after this doc and the core 01-12 pipeline were written
+(see `docs/migration-gap-analysis.md` for the CLOSED entries). All run
+after step 10 (Lots), resolving target lot IDs via
+`_migration_lot_map` the same way steps 13/15 do.
+
+```
+Tax Jurisdictions (step 17_TaxJurisdictions):
+  g_tax_classes.ID, tax_description, tax_rate
+    → tax_jurisdictions (one row per distinct class, tenant-scoped)
+  {NNN}_inventory.tax_class_id → lots.tax_jurisdiction_id
+  Clean FK-for-FK swap, no inference.
+
+Consignors (step 18_Consignors):
+  c_consignors.ID                 → consignors.id (preserve, like clients)
+  c_consignors.client_id          → consignors.client_id
+  c_consignors.description        → consignors.name
+  {NNN}_inventory.consignor_id    → lots.consignor_id
+
+Client Commission Default (step 19_ClientCommissions):
+  Per client: mode({NNN}_inventory.comm_class_id across their lots)
+    → g_commission_classes.com_rate × 100
+    → clients.commission_rate (best-effort default, NOT authoritative —
+       source has no per-client commission concept; c_indiv_commissions
+       is keyed by a free-text recipient name, not a client FK)
+  clients.commission_cap: no source analog, left NULL.
+
+Lot Vehicle Details (step 20_LotVehicleDetails):
+  {NNN}_inventory.description, gated on a VIN-shaped token
+    → lot_vehicle_details.make/model/model_year/mileage/fuel_type/
+      transmission/identification_number (marker-split on ";")
+  {NNN}_inventory.disclosure_id → a_disclosures.disc_title (normalized)
+    → lot_vehicle_details.title_status (more reliable than the free
+      text for this one field)
+    → lots.requires_title = true when the disclosure implies a real
+      title changes hands
 ```
 
 ---

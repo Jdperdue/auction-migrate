@@ -25,6 +25,11 @@ require __DIR__ . '/src/steps/12_Finalize.php';
 require __DIR__ . '/src/steps/13_LotPhotos.php';
 require __DIR__ . '/src/steps/14_ClientTemplates.php';
 require __DIR__ . '/src/steps/15_ClientLocations.php';
+require __DIR__ . '/src/steps/16_ClientLogos.php';
+require __DIR__ . '/src/steps/17_TaxJurisdictions.php';
+require __DIR__ . '/src/steps/18_Consignors.php';
+require __DIR__ . '/src/steps/19_ClientCommissions.php';
+require __DIR__ . '/src/steps/20_LotVehicleDetails.php';
 
 /**
  * Ordered migration steps. `transactional` = true means run.php wraps the
@@ -48,6 +53,11 @@ $STEPS = [
     '13_LotPhotos' => ['class' => Step13LotPhotos::class, 'transactional' => false, 'requiresTenant' => true],
     '14_ClientTemplates' => ['class' => Step14ClientTemplates::class, 'transactional' => true, 'requiresTenant' => true],
     '15_ClientLocations' => ['class' => Step15ClientLocations::class, 'transactional' => false, 'requiresTenant' => true],
+    '16_ClientLogos' => ['class' => Step16ClientLogos::class, 'transactional' => false, 'requiresTenant' => true],
+    '17_TaxJurisdictions' => ['class' => Step17TaxJurisdictions::class, 'transactional' => false, 'requiresTenant' => true],
+    '18_Consignors' => ['class' => Step18Consignors::class, 'transactional' => false, 'requiresTenant' => true],
+    '19_ClientCommissions' => ['class' => Step19ClientCommissions::class, 'transactional' => false, 'requiresTenant' => true],
+    '20_LotVehicleDetails' => ['class' => Step20LotVehicleDetails::class, 'transactional' => false, 'requiresTenant' => true],
 ];
 
 function parseArgs(array $argv): array
