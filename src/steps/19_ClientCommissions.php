@@ -3,18 +3,16 @@
 declare(strict_types=1);
 
 /**
- * Derives a default clients.commission_rate from source data. The source has
- * no per-client commission concept — g_commission_classes (rate lookup) is
- * assigned per lot (comm_class_id on {NNN}_inventory), and the only other
- * commission table, c_indiv_commissions, is keyed by a free-text `recipient`
- * name ("David Dean SEE NOTES", "DD", ...) that doesn't join to any client.
- * This step takes each client's most-frequent comm_class_id across their own
- * historical lots and uses that class's rate as a best-effort default —
- * inferred, not authoritative. commission_cap has no source analog and is
- * left NULL. There's no status/needs_review column on `clients` to flag this
- * formally (unlike steps 14/15/17's target tables), so every write is logged
- * plainly as an inferred default an operator should verify before relying on
- * it for billing.
+ * Sets clients.commission_rate and clients.commission_cap from the
+ * source's actual per-client field, c_client_data.comm_class_id1 (rate,
+ * via g_commission_classes) and comm_cap. A clean FK-for-FK-plus-column
+ * copy, no inference needed -- c_client_data has exactly one row per
+ * client (verified: 1936/1936, 0 orphans against g_commission_classes),
+ * unlike the mode-across-lots approach this step used before
+ * c_client_data was found. comm_class_id2 (a secondary commission class,
+ * populated for only 23/1936 clients) has no equivalent second-rate field
+ * on `clients` and is left unused. commission_cap is populated for only
+ * 3/1936 clients in the source; the rest are left NULL, same as before.
  */
 class Step19ClientCommissions implements StepInterface
 {
@@ -32,16 +30,21 @@ class Step19ClientCommissions implements StepInterface
         $result = new StepResult();
 
         $rateByClassId = $this->loadCommissionClasses($source);
-        $clientIdByAuction = $this->loadAuctionClients($target);
-        $classCountsByClient = $this->tallyCommClassCounts($source, $clientIdByAuction);
+
+        $rows = $source->query(
+            'SELECT client_id, comm_class_id1, comm_cap FROM c_client_data ORDER BY client_id'
+        )->fetchAll();
 
         $checkStmt = $target->prepare('SELECT commission_rate FROM clients WHERE id = :id');
         $updateStmt = $target->prepare(
-            'UPDATE clients SET commission_rate = :rate, updated_at = NOW() WHERE id = :id'
+            'UPDATE clients SET commission_rate = :rate, commission_cap = :cap, updated_at = NOW() WHERE id = :id'
         );
 
-        foreach ($classCountsByClient as $clientId => $classCounts) {
+        foreach ($rows as $row) {
             $result->processed++;
+            $clientId = (int) $row['client_id'];
+            $classId = (int) $row['comm_class_id1'];
+            $cap = $row['comm_cap'] !== null ? (float) $row['comm_cap'] : null;
 
             $checkStmt->execute(['id' => $clientId]);
             $existing = $checkStmt->fetchColumn();
@@ -50,23 +53,21 @@ class Step19ClientCommissions implements StepInterface
                 continue;
             }
 
-            $modeClassId = $this->mostFrequent($classCounts);
-            if ($modeClassId === null || !isset($rateByClassId[$modeClassId])) {
-                $this->logger->warn("Client {$clientId}: no resolvable commission class across their lots — leaving commission_rate NULL.");
+            if (!isset($rateByClassId[$classId])) {
+                $this->logger->error("Client id={$clientId}: comm_class_id1={$classId} has no resolvable commission rate — leaving commission_rate NULL.");
                 $result->skipped++;
                 continue;
             }
 
-            $ratePercent = round($rateByClassId[$modeClassId] * 100, 2);
+            $ratePercent = round($rateByClassId[$classId] * 100, 2);
 
             if ($dryRun) {
-                $this->logger->dryRun("Would set clients.id={$clientId} commission_rate={$ratePercent} (inferred from comm_class_id={$modeClassId}, most frequent across their lots — verify before billing).");
+                $this->logger->dryRun("Would set clients.id={$clientId} commission_rate={$ratePercent}" . ($cap !== null ? " commission_cap={$cap}" : ''));
                 $result->inserted++;
                 continue;
             }
 
-            $updateStmt->execute(['rate' => $ratePercent, 'id' => $clientId]);
-            $this->logger->info("Client {$clientId}: set commission_rate={$ratePercent} — inferred default from most-frequent comm_class_id={$modeClassId}, NOT authoritative. Verify before relying on it for billing.");
+            $updateStmt->execute(['rate' => $ratePercent, 'cap' => $cap, 'id' => $clientId]);
             $result->inserted++;
         }
 
@@ -88,69 +89,5 @@ class Step19ClientCommissions implements StepInterface
         }
 
         return $map;
-    }
-
-    /**
-     * @return array<int, int> auction id => client id, restricted to this tenant
-     */
-    private function loadAuctionClients(PDO $target): array
-    {
-        $stmt = $target->prepare('SELECT id, client_id FROM auctions WHERE tenant_id = :tenant_id');
-        $stmt->execute(['tenant_id' => $this->config->tenantId]);
-
-        $map = [];
-        foreach ($stmt->fetchAll() as $row) {
-            $map[(int) $row['id']] = (int) $row['client_id'];
-        }
-
-        return $map;
-    }
-
-    /**
-     * @param array<int, int> $clientIdByAuction
-     * @return array<int, array<int, int>> client id => [comm_class_id => count]
-     */
-    private function tallyCommClassCounts(PDO $source, array $clientIdByAuction): array
-    {
-        $tallies = [];
-        $prefixes = Support::sourceAuctionPrefixes($source);
-
-        foreach ($prefixes as $prefix) {
-            $invTable = "{$prefix}_inventory";
-            if (!Support::tableExists($source, $invTable)) {
-                continue;
-            }
-
-            $auctionNum = Support::auctionNumberFromPrefix($prefix);
-            $clientId = $clientIdByAuction[$auctionNum] ?? null;
-            if ($clientId === null) {
-                continue;
-            }
-
-            $rows = $source->query("SELECT comm_class_id FROM {$invTable}")->fetchAll(PDO::FETCH_COLUMN);
-            foreach ($rows as $commClassId) {
-                if ($commClassId === null) {
-                    continue;
-                }
-                $commClassId = (int) $commClassId;
-                $tallies[$clientId][$commClassId] = ($tallies[$clientId][$commClassId] ?? 0) + 1;
-            }
-        }
-
-        return $tallies;
-    }
-
-    /**
-     * @param array<int, int> $classCounts comm_class_id => count
-     */
-    private function mostFrequent(array $classCounts): ?int
-    {
-        if (empty($classCounts)) {
-            return null;
-        }
-
-        arsort($classCounts);
-
-        return array_key_first($classCounts);
     }
 }

@@ -211,21 +211,24 @@ setting up large auctions.
 
 ## Client Data
 
-### Commission Structure (`g_commission_classes`, `c_indiv_commissions`) — CLOSED
+### Commission Structure (`g_commission_classes`, `c_client_data`) — CLOSED
 ```
-comm_class_id   (per lot, on {NNN}_inventory)
+comm_class_id1  (per client, on c_client_data — authoritative)
+comm_class_id2  (per client, on c_client_data — secondary, 23/1936 rows, unused)
+comm_cap        decimal (per client, on c_client_data — 3/1936 rows)
 com_rate        float  (g_commission_classes)
-rate            float  (c_indiv_commissions, keyed by free-text recipient name)
 ```
 No longer a gap — `clients.commission_rate`/`commission_cap` shipped on
-the target 2026-07-04. Migration step `19_ClientCommissions` sets a
-default `commission_rate` per client from their most-frequent
-`comm_class_id` across historical lots. This is a best-effort inferred
-default, not authoritative: the source assigns commission per lot, not
-per client, and `c_indiv_commissions` can't be joined to any client (its
-`recipient` column is free text like `"David Dean SEE NOTES"`).
-`commission_cap` has no source analog and is left NULL. See
-`migration-renebates.md` for the full mapping.
+the target 2026-07-04. Migration step `19_ClientCommissions` sets
+`commission_rate` and `commission_cap` directly from
+`c_client_data.comm_class_id1`/`comm_cap` — one row per client, 0
+orphans against `g_commission_classes`. A clean FK-for-FK-plus-column
+copy, not an inference. (Until `c_client_data` was found on 2026-07-27,
+this step inferred a default from each client's most-frequent
+`comm_class_id` across their historical lots — wrong for 58/1936
+clients compared to the real data. `c_indiv_commissions`, keyed by a
+free-text recipient name, still can't be joined to any client and
+remains unused.) See `migration-renebates.md` for the full mapping.
 
 ---
 
@@ -238,6 +241,18 @@ shipped on the target 2026-07-04. Migration step `17_TaxJurisdictions`
 seeds one `tax_jurisdictions` row per distinct source tax class and
 sets `lots.tax_jurisdiction_id` directly from `tax_class_id` — a clean
 FK-for-FK swap, no inference needed.
+
+`clients.tax_jurisdiction_id` shipped on the target 2026-07-27
+(migration `2026_07_27_000001_add_tax_jurisdiction_id_to_clients_table`).
+`c_client_data.tax_class_id` (found the same day) is an authoritative
+per-client tax field — one row per client, 0 orphans against
+`g_tax_classes` — so step `21_ClientTaxJurisdictions` sets
+`tax_jurisdiction_id` directly from it (via `g_tax_classes`, matched by
+name to the `tax_jurisdictions` rows step 17 seeds), a clean FK-for-FK
+swap. (The step originally inferred a default from each client's
+most-frequent already-resolved `lots.tax_jurisdiction_id` before
+`c_client_data` was found — wrong for 42/1936 clients and left 1857
+NULL for clients with no lots.)
 
 ---
 
@@ -322,7 +337,7 @@ CRM or document management tool. Discard.
 | Auction images | `a_live_auctions` | Medium | Add `auction_images` table |
 | Closing time display | `a_auctions` | Low | Add `closing_time_display` to `auctions` |
 | Stagger templates | `a_staggered_ends` | Low | UI convenience feature — no data to migrate |
-| Seller commissions | `g_commission_classes` | Closed | Schema shipped 07-04; step `19_ClientCommissions` (inferred default) |
+| Seller commissions | `g_commission_classes`, `c_client_data` | Closed | Schema shipped 07-04; step `19_ClientCommissions` copies `c_client_data` directly (found 07-27) |
 | Tax classes | `g_tax_classes` | Closed | Schema shipped 07-04; step `17_TaxJurisdictions` (clean FK swap) |
 | Consignors | `c_consignors` | Closed | Schema shipped 07-04; step `18_Consignors` (1:1, preserved IDs) |
 | Vehicle details | `{NNN}_inventory.description` | Closed | Schema shipped 07-11; step `20_LotVehicleDetails` (VIN-gated parse) |

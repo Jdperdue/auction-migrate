@@ -404,9 +404,12 @@ gn.creator      → (if 'admin' or 'auction' → author_id = migration system us
 
 Added 2026-07-24 to close gaps opened by Laravel migrations that landed
 on the target after this doc and the core 01-12 pipeline were written
-(see `docs/migration-gap-analysis.md` for the CLOSED entries). All run
-after step 10 (Lots), resolving target lot IDs via
-`_migration_lot_map` the same way steps 13/15 do.
+(see `docs/migration-gap-analysis.md` for the CLOSED entries). Steps
+17, 18, and 20 run after step 10 (Lots), resolving target lot IDs via
+`_migration_lot_map` the same way steps 13/15 do. Steps 19 and 21
+(added/rewritten 2026-07-27 once `c_client_data` was found) only touch
+`clients` and have no lot dependency — they just need step 03
+(Clients) and, for 21, step 17 (`tax_jurisdictions` seeded).
 
 ```
 Tax Jurisdictions (step 17_TaxJurisdictions):
@@ -421,13 +424,17 @@ Consignors (step 18_Consignors):
   c_consignors.description        → consignors.name
   {NNN}_inventory.consignor_id    → lots.consignor_id
 
-Client Commission Default (step 19_ClientCommissions):
-  Per client: mode({NNN}_inventory.comm_class_id across their lots)
-    → g_commission_classes.com_rate × 100
-    → clients.commission_rate (best-effort default, NOT authoritative —
-       source has no per-client commission concept; c_indiv_commissions
-       is keyed by a free-text recipient name, not a client FK)
-  clients.commission_cap: no source analog, left NULL.
+Client Commission (step 19_ClientCommissions):
+  c_client_data.comm_class_id1 → g_commission_classes.com_rate × 100
+    → clients.commission_rate (authoritative, one row per client)
+  c_client_data.comm_cap → clients.commission_cap (populated for
+    3/1936 clients in the source; the rest left NULL)
+  c_client_data.comm_class_id2 (secondary class, 23/1936 clients) has
+    no equivalent field on `clients` — unused.
+  (Before c_client_data was found on 2026-07-27, this step inferred a
+  default from mode({NNN}_inventory.comm_class_id across a client's
+  lots) — wrong for 58/1936 clients vs. the real data. c_indiv_commissions,
+  keyed by a free-text recipient name with no client FK, is still unused.)
 
 Lot Vehicle Details (step 20_LotVehicleDetails):
   {NNN}_inventory.description, gated on a VIN-shaped token
@@ -438,6 +445,16 @@ Lot Vehicle Details (step 20_LotVehicleDetails):
       text for this one field)
     → lots.requires_title = true when the disclosure implies a real
       title changes hands
+
+Client Tax Jurisdiction (step 21_ClientTaxJurisdictions):
+  c_client_data.tax_class_id → g_tax_classes.tax_description
+    → tax_jurisdictions.name (tenant-scoped, matched to the rows step
+      17 seeds) → clients.tax_jurisdiction_id
+  Clean FK-for-FK swap, one row per client, no inference.
+  (Before c_client_data was found on 2026-07-27, this step inferred a
+  default from mode(lots.tax_jurisdiction_id across a client's own
+  lots, via auctions.client_id) — wrong for 42/1936 clients and left
+  1857 NULL for clients with no lots to infer from.)
 ```
 
 ---
@@ -593,7 +610,10 @@ a target-side transaction.
 - `a_invoices` — historical invoice totals; not needed for platform operation
 - `m_*` tables — mailing list / marketing data; not part of auction platform
 - `g_admin_users` — operator staff accounts; recreate via platform UI
-- `c_contracts`, `c_client_data` — internal CRM data; no target schema
+- `c_contracts` — internal CRM data; no target schema
+  (`c_client_data` was originally listed here too, but it was found on
+  2026-07-27 to hold authoritative per-client `tax_class_id` and
+  `comm_class_id1`/`comm_cap` — see steps 19 and 21 above)
 - `b_bidder_dl` — driver's license data; sensitive, no target schema
 - `b_bidder_tax` — tax exemption data; no target schema in v1
 - `a_archive_*` — archived search/category data; not needed

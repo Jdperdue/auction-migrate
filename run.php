@@ -30,6 +30,7 @@ require __DIR__ . '/src/steps/17_TaxJurisdictions.php';
 require __DIR__ . '/src/steps/18_Consignors.php';
 require __DIR__ . '/src/steps/19_ClientCommissions.php';
 require __DIR__ . '/src/steps/20_LotVehicleDetails.php';
+require __DIR__ . '/src/steps/21_ClientTaxJurisdictions.php';
 
 /**
  * Ordered migration steps. `transactional` = true means run.php wraps the
@@ -58,6 +59,7 @@ $STEPS = [
     '18_Consignors' => ['class' => Step18Consignors::class, 'transactional' => false, 'requiresTenant' => true],
     '19_ClientCommissions' => ['class' => Step19ClientCommissions::class, 'transactional' => false, 'requiresTenant' => true],
     '20_LotVehicleDetails' => ['class' => Step20LotVehicleDetails::class, 'transactional' => false, 'requiresTenant' => true],
+    '21_ClientTaxJurisdictions' => ['class' => Step21ClientTaxJurisdictions::class, 'transactional' => false, 'requiresTenant' => true],
 ];
 
 function parseArgs(array $argv): array

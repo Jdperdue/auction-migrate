@@ -75,15 +75,17 @@ pipeline has completed against real data:
 - `18_Consignors` — migrates `c_consignors` into `consignors`,
   preserving source IDs 1:1 (same shape as step 03 Clients), and sets
   `lots.consignor_id` from each lot's `consignor_id`.
-- `19_ClientCommissions` — sets a default `clients.commission_rate`
-  from each client's most-frequent `comm_class_id` across their
-  historical lots. The source has no per-client commission concept —
-  commission is assigned per lot, or ad hoc via a free-text
-  `c_indiv_commissions.recipient` name that doesn't join to any
-  client — so this is a best-effort inferred default, not
-  authoritative. `commission_cap` has no source analog and is left
-  NULL. Every write is logged plainly as inferred; verify before
-  relying on it for billing.
+- `19_ClientCommissions` — sets `clients.commission_rate` and
+  `commission_cap` directly from `c_client_data.comm_class_id1` (via
+  `g_commission_classes`) and `c_client_data.comm_cap` — one row per
+  client, 0 orphans against the lookup table. A clean FK-for-FK-plus-
+  column copy, not an inference: `c_client_data` was found 2026-07-27
+  and has an authoritative per-client commission field, superseding
+  the original mode-across-historical-lots approach (which had been
+  wrong for 58/1936 clients). `comm_class_id2` (a secondary class,
+  populated for only 23/1936 clients) has no equivalent second-rate
+  field on `clients` and is left unused. `commission_cap` is only
+  populated for 3/1936 clients in the source; the rest are left NULL.
 - `20_LotVehicleDetails` — parses `{NNN}_inventory.description` for
   vehicle attributes (make, model, year, VIN, mileage, fuel type,
   transmission) and seeds `lot_vehicle_details`. Gated on finding a
@@ -92,15 +94,26 @@ pipeline has completed against real data:
   `disclosure_id` -> `a_disclosures`, not the free text, since that's
   the more reliable of the two sources; `lots.requires_title` is also
   set when the resolved disclosure implies a real title changes hands.
+- `21_ClientTaxJurisdictions` — sets `clients.tax_jurisdiction_id`
+  directly from `c_client_data.tax_class_id` (via `g_tax_classes`,
+  matched by name to the `tax_jurisdictions` rows step 17 already
+  seeded) — one row per client, 0 orphans against the lookup table.
+  A clean FK-for-FK swap, not an inference: `c_client_data` was found
+  2026-07-27 and has an authoritative per-client tax field, superseding
+  the original mode-across-lots approach (which had been wrong for
+  42/1936 clients and left 1857 NULL for clients with no lots to infer
+  from). Runs after step 17 (`tax_jurisdictions` must already be
+  seeded); no longer depends on lots/auctions.
 
-**Steps 14, 15, and 19 are seeding functions, not sources of truth** —
-14 and 15 insert rows with `status = 'needs_review'`; 19 has no such
-column on `clients` but every write is logged as an inferred default.
-An operator must proof each client's template, locations, and
-commission rate before they're used for real auctions or billing.
-Steps 16-18 and 20 copy or resolve real source data 1:1 (or gate
-strictly enough that a written row is trustworthy), so there's nothing
-to review beyond the normal skip warnings in the log.
+**Steps 14 and 15 are seeding functions, not sources of truth** —
+they insert rows with `status = 'needs_review'`; an operator must
+proof each client's template and locations before they're used for
+real auctions. Steps 16-18, 19, 20, and 21 copy or resolve real source
+data 1:1 (or gate strictly enough that a written row is trustworthy),
+so there's nothing to review beyond the normal skip warnings in the
+log. (19 and 21 were inferred defaults until 2026-07-27, when
+`c_client_data` — an authoritative per-client commission/tax table —
+was found; both were rewritten to copy it directly instead.)
 
 ## Key rules
 
