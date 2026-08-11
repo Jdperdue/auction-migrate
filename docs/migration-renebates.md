@@ -71,17 +71,34 @@ Record the generated `tenant_id` — used as FK on all migrated records.
 
 ```
 SOURCE: g_categories WHERE cat_type = 'lot'
-TARGET: categories
+TARGET: categories (tenant-scoped as of 2026-08-02) via _migration_category_map
 
-g_categories.ID              → categories.id (preserve)
-g_categories.cat_description → categories.name
-                             → categories.slug (slugify cat_description)
-                               categories.is_active = true
-                               categories.sort_order = sequential
+g_categories.ID              → _migration_category_map.source_category_id
+g_categories.cat_description → categories.name (case-insensitive match against
+                                existing tenant categories; only inserts a new
+                                row if no match — see below)
+                             → categories.slug (slugify cat_description, new rows only)
+                               categories.tenant_id = TENANT_ID (new rows only)
+                               categories.is_active = true (new rows only)
+                               categories.sort_order = sequential (new rows only)
 ```
 
 Note: `g_categories` has `cat_type` enum ('lot','geo','spc'). Only
 `cat_type = 'lot'` maps to auction categories. Skip geo and spc.
+
+**2026-08-02 schema change**: `categories` gained a `tenant_id` column
+(category-templates feature) — tenants are now seeded with a starter set of
+categories from a `category_templates` row on creation, not by this
+migration tool, so target category IDs no longer match source IDs 1:1 and
+can't be preserved. `02_Categories.php` instead matches each source
+category to the tenant's existing categories by case-insensitive name and
+records the mapping in `_migration_category_map`; only source categories
+with no name match (e.g. "Armored Vehicles" for René Bates, as of
+2026-08-11) get a newly-inserted tenant-scoped row. Step 10 (Lots) resolves
+`inv.primary_category_id` through this map rather than using it directly
+as a target ID. The map is never dropped by `reset.php` — categories
+persist across tenant resets, so the map must too, keeping step 02
+idempotent on repeat refreshes.
 
 ---
 

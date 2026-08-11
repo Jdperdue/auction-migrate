@@ -49,9 +49,10 @@ class Step18Consignors implements StepInterface
 
         $checkStmt = $target->prepare('SELECT id FROM consignors WHERE id = :id');
         $clientCheckStmt = $target->prepare('SELECT id FROM clients WHERE id = :id');
+        $slugCheckStmt = $target->prepare('SELECT 1 FROM consignors WHERE client_id = :client_id AND slug = :slug');
         $insertStmt = $target->prepare(
-            'INSERT INTO consignors (id, tenant_id, client_id, name, status, created_at, updated_at)
-             VALUES (:id, :tenant_id, :client_id, :name, \'active\', NOW(), NOW())'
+            'INSERT INTO consignors (id, tenant_id, client_id, name, slug, status, created_at, updated_at)
+             VALUES (:id, :tenant_id, :client_id, :name, :slug, \'active\', NOW(), NOW())'
         );
 
         $present = [];
@@ -87,12 +88,31 @@ class Step18Consignors implements StepInterface
                 'tenant_id' => $this->config->tenantId,
                 'client_id' => $clientId,
                 'name' => $row['description'],
+                'slug' => $this->uniqueSlug($slugCheckStmt, $clientId, Support::slugify((string) $row['description'])),
             ]);
             $present[$id] = true;
             $result->inserted++;
         }
 
         return $present;
+    }
+
+    /**
+     * consignors has a (client_id, slug) unique constraint (added
+     * 2026-08-02) — appends -2, -3, ... on collision.
+     */
+    private function uniqueSlug(PDOStatement $slugCheckStmt, int $clientId, string $baseSlug): string
+    {
+        $slug = $baseSlug;
+        $suffix = 2;
+        while (true) {
+            $slugCheckStmt->execute(['client_id' => $clientId, 'slug' => $slug]);
+            if ($slugCheckStmt->fetchColumn() === false) {
+                return $slug;
+            }
+            $slug = "{$baseSlug}-{$suffix}";
+            $suffix++;
+        }
     }
 
     /**

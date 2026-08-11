@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /**
- * Sets clients.commission_rate and clients.commission_cap from the
+ * Sets clients.commission_rate_id and clients.commission_cap from the
  * source's actual per-client field, c_client_data.comm_class_id1 (rate,
  * via g_commission_classes) and comm_cap. A clean FK-for-FK-plus-column
  * copy, no inference needed -- c_client_data has exactly one row per
@@ -13,11 +13,21 @@ declare(strict_types=1);
  * populated for only 23/1936 clients) has no equivalent second-rate field
  * on `clients` and is left unused. commission_cap is populated for only
  * 3/1936 clients in the source; the rest are left NULL, same as before.
+ *
+ * 2026-08-01 schema change: `clients.commission_rate` (a plain decimal)
+ * was dropped in favor of `clients.commission_rate_id`, a FK into a new
+ * tenant-scoped `commission_rates` lookup table (name + rate). This step
+ * now finds-or-creates the tenant's commission_rates row for each
+ * resolved rate (named e.g. "7.5%", same convention as the app's own
+ * backfill migration used) instead of writing the rate directly.
  */
 class Step19ClientCommissions implements StepInterface
 {
     private Logger $logger;
     private StepConfig $config;
+
+    /** @var array<string, int> rate (2-decimal string key) => commission_rates.id */
+    private array $rateIdCache = [];
 
     public function __construct(Logger $logger, StepConfig $config)
     {
@@ -35,9 +45,9 @@ class Step19ClientCommissions implements StepInterface
             'SELECT client_id, comm_class_id1, comm_cap FROM c_client_data ORDER BY client_id'
         )->fetchAll();
 
-        $checkStmt = $target->prepare('SELECT commission_rate FROM clients WHERE id = :id');
+        $checkStmt = $target->prepare('SELECT commission_rate_id FROM clients WHERE id = :id');
         $updateStmt = $target->prepare(
-            'UPDATE clients SET commission_rate = :rate, commission_cap = :cap, updated_at = NOW() WHERE id = :id'
+            'UPDATE clients SET commission_rate_id = :rate_id, commission_cap = :cap, updated_at = NOW() WHERE id = :id'
         );
 
         foreach ($rows as $row) {
@@ -54,7 +64,7 @@ class Step19ClientCommissions implements StepInterface
             }
 
             if (!isset($rateByClassId[$classId])) {
-                $this->logger->error("Client id={$clientId}: comm_class_id1={$classId} has no resolvable commission rate — leaving commission_rate NULL.");
+                $this->logger->error("Client id={$clientId}: comm_class_id1={$classId} has no resolvable commission rate — leaving commission_rate_id NULL.");
                 $result->skipped++;
                 continue;
             }
@@ -62,18 +72,47 @@ class Step19ClientCommissions implements StepInterface
             $ratePercent = round($rateByClassId[$classId] * 100, 2);
 
             if ($dryRun) {
-                $this->logger->dryRun("Would set clients.id={$clientId} commission_rate={$ratePercent}" . ($cap !== null ? " commission_cap={$cap}" : ''));
+                $this->logger->dryRun("Would set clients.id={$clientId} commission_rate={$ratePercent}%" . ($cap !== null ? " commission_cap={$cap}" : ''));
                 $result->inserted++;
                 continue;
             }
 
-            $updateStmt->execute(['rate' => $ratePercent, 'cap' => $cap, 'id' => $clientId]);
+            $rateId = $this->findOrCreateCommissionRateId($target, $ratePercent);
+
+            $updateStmt->execute(['rate_id' => $rateId, 'cap' => $cap, 'id' => $clientId]);
             $result->inserted++;
         }
 
         $this->logger->info("ClientCommissions: {$result->processed} processed, {$result->inserted} inserted, {$result->skipped} skipped.");
 
         return $result;
+    }
+
+    private function findOrCreateCommissionRateId(PDO $target, float $ratePercent): int
+    {
+        $key = number_format($ratePercent, 2, '.', '');
+        if (isset($this->rateIdCache[$key])) {
+            return $this->rateIdCache[$key];
+        }
+
+        $findStmt = $target->prepare('SELECT id FROM commission_rates WHERE tenant_id = :tenant_id AND rate = :rate');
+        $findStmt->execute(['tenant_id' => $this->config->tenantId, 'rate' => $key]);
+        $existing = $findStmt->fetchColumn();
+        if ($existing !== false) {
+            $this->rateIdCache[$key] = (int) $existing;
+
+            return $this->rateIdCache[$key];
+        }
+
+        $name = rtrim(rtrim($key, '0'), '.') . '%';
+        $insertStmt = $target->prepare(
+            'INSERT INTO commission_rates (tenant_id, name, rate, is_active, created_at, updated_at)
+             VALUES (:tenant_id, :name, :rate, 1, NOW(), NOW())'
+        );
+        $insertStmt->execute(['tenant_id' => $this->config->tenantId, 'name' => $name, 'rate' => $key]);
+        $this->rateIdCache[$key] = (int) $target->lastInsertId();
+
+        return $this->rateIdCache[$key];
     }
 
     /**

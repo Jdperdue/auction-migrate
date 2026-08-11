@@ -40,7 +40,7 @@ require __DIR__ . '/src/steps/21_ClientTaxJurisdictions.php';
  */
 $STEPS = [
     '01_Tenant' => ['class' => Step01Tenant::class, 'transactional' => true, 'requiresTenant' => false],
-    '02_Categories' => ['class' => Step02Categories::class, 'transactional' => true, 'requiresTenant' => false],
+    '02_Categories' => ['class' => Step02Categories::class, 'transactional' => false, 'requiresTenant' => false],
     '03_Clients' => ['class' => Step03Clients::class, 'transactional' => true, 'requiresTenant' => true],
     '04_Sellers' => ['class' => Step04Sellers::class, 'transactional' => true, 'requiresTenant' => true],
     '05_Bidders' => ['class' => Step05Bidders::class, 'transactional' => true, 'requiresTenant' => true],

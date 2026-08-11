@@ -48,8 +48,8 @@ class Step17TaxJurisdictions implements StepInterface
 
         $findStmt = $target->prepare('SELECT id FROM tax_jurisdictions WHERE tenant_id = :tenant_id AND name = :name');
         $insertStmt = $target->prepare(
-            'INSERT INTO tax_jurisdictions (tenant_id, name, rate, is_non_taxable, is_active, created_at, updated_at)
-             VALUES (:tenant_id, :name, :rate, :is_non_taxable, 1, NOW(), NOW())'
+            'INSERT INTO tax_jurisdictions (tenant_id, name, slug, rate, is_non_taxable, is_active, created_at, updated_at)
+             VALUES (:tenant_id, :name, :slug, :rate, :is_non_taxable, 1, NOW(), NOW())'
         );
 
         $map = [];
@@ -77,6 +77,7 @@ class Step17TaxJurisdictions implements StepInterface
             $insertStmt->execute([
                 'tenant_id' => $this->config->tenantId,
                 'name' => $name,
+                'slug' => $this->uniqueSlug($target, $this->config->tenantId, Support::slugify($name)),
                 'rate' => $rate,
                 'is_non_taxable' => $isNonTaxable,
             ]);
@@ -84,6 +85,27 @@ class Step17TaxJurisdictions implements StepInterface
         }
 
         return $map;
+    }
+
+    /**
+     * tax_jurisdictions has a (tenant_id, slug) unique constraint (added
+     * 2026-08-02) — appends -2, -3, ... on collision, same convention as
+     * the target app's own Slug::make backfill for this column.
+     */
+    private function uniqueSlug(PDO $target, ?int $tenantId, string $baseSlug): string
+    {
+        $checkStmt = $target->prepare('SELECT 1 FROM tax_jurisdictions WHERE tenant_id = :tenant_id AND slug = :slug');
+
+        $slug = $baseSlug;
+        $suffix = 2;
+        while (true) {
+            $checkStmt->execute(['tenant_id' => $tenantId, 'slug' => $slug]);
+            if ($checkStmt->fetchColumn() === false) {
+                return $slug;
+            }
+            $slug = "{$baseSlug}-{$suffix}";
+            $suffix++;
+        }
     }
 
     /**

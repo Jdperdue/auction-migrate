@@ -11,6 +11,12 @@ declare(strict_types=1);
  * `type = 'attempt'` rows (rejected bids) and `is_removed = 1` rows
  * (retracted bids) are skipped per docs/migration-renebates.md.
  *
+ * Skips an auction entirely if it already has any `bids` rows (checked
+ * before inserting, same idempotency pattern as step 10's
+ * `_migration_lot_map` guard) — `bids` has no natural unique key to fall
+ * back on, so re-running this step for an auction that already migrated
+ * would otherwise duplicate every bid.
+ *
  * Processed in chunks of BATCH_SIZE — not a single transaction.
  */
 class Step11Bids implements StepInterface
@@ -37,12 +43,13 @@ class Step11Bids implements StepInterface
 
         $map = new MigrationMap($target);
         $bidderCheckStmt = $target->prepare('SELECT id FROM bidders WHERE id = :id');
+        $bidsExistStmt = $target->prepare('SELECT 1 FROM bids WHERE auction_id = :auction_id LIMIT 1');
 
         $prefixes = Support::sourceAuctionPrefixes($source);
         $this->logger->info(count($prefixes) . ' auction table set(s) found in source.');
 
         foreach ($prefixes as $prefix) {
-            $this->processAuction($prefix, $source, $target, $map, $dryRun, $result, $bidderCheckStmt);
+            $this->processAuction($prefix, $source, $target, $map, $dryRun, $result, $bidderCheckStmt, $bidsExistStmt);
         }
 
         $this->logger->info("Bids: {$result->processed} processed, {$result->inserted} inserted, {$result->skipped} skipped.");
@@ -57,7 +64,8 @@ class Step11Bids implements StepInterface
         MigrationMap $map,
         bool $dryRun,
         StepResult $result,
-        PDOStatement $bidderCheckStmt
+        PDOStatement $bidderCheckStmt,
+        PDOStatement $bidsExistStmt
     ): void {
         $auctionNum = Support::auctionNumberFromPrefix($prefix);
         $baTable = "{$prefix}_bidder_activity";
@@ -66,6 +74,15 @@ class Step11Bids implements StepInterface
             $this->logger->warn("{$baTable} does not exist — skipping auction {$prefix}.");
 
             return;
+        }
+
+        if (!$dryRun) {
+            $bidsExistStmt->execute(['auction_id' => $auctionNum]);
+            if ($bidsExistStmt->fetchColumn() !== false) {
+                $this->logger->warn("Auction {$auctionNum} already has migrated bids — skipping to avoid duplicates.");
+
+                return;
+            }
         }
 
         $batchSize = $this->config->batchSize;

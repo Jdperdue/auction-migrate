@@ -32,7 +32,6 @@ class Step10Lots implements StepInterface
             $map->ensureTable();
         }
 
-        $validCategoryIds = array_flip($target->query('SELECT id FROM categories')->fetchAll(PDO::FETCH_COLUMN));
         $bidderCheckStmt = $target->prepare('SELECT id FROM bidders WHERE id = :id');
         $auctionCheckStmt = $target->prepare('SELECT id FROM auctions WHERE id = :id');
 
@@ -40,7 +39,7 @@ class Step10Lots implements StepInterface
         $this->logger->info(count($prefixes) . ' auction table set(s) found in source.');
 
         foreach ($prefixes as $prefix) {
-            $this->processAuction($prefix, $source, $target, $map, $dryRun, $result, $validCategoryIds, $bidderCheckStmt, $auctionCheckStmt);
+            $this->processAuction($prefix, $source, $target, $map, $dryRun, $result, $bidderCheckStmt, $auctionCheckStmt);
         }
 
         $this->logger->info("Lots: {$result->processed} processed, {$result->inserted} inserted, {$result->skipped} skipped.");
@@ -55,7 +54,6 @@ class Step10Lots implements StepInterface
         MigrationMap $map,
         bool $dryRun,
         StepResult $result,
-        array $validCategoryIds,
         PDOStatement $bidderCheckStmt,
         PDOStatement $auctionCheckStmt
     ): void {
@@ -149,7 +147,6 @@ class Step10Lots implements StepInterface
                         $map,
                         $dryRun,
                         $result,
-                        $validCategoryIds,
                         $bidderCheckStmt,
                         $insertLotStmt,
                         $insertImageStmt
@@ -186,7 +183,6 @@ class Step10Lots implements StepInterface
         MigrationMap $map,
         bool $dryRun,
         StepResult $result,
-        array $validCategoryIds,
         PDOStatement $bidderCheckStmt,
         PDOStatement $insertLotStmt,
         PDOStatement $insertImageStmt
@@ -194,10 +190,10 @@ class Step10Lots implements StepInterface
         $result->processed++;
         $sourceLotId = (int) $row['inv_id'];
 
-        $categoryId = $row['category_id'] !== null ? (int) $row['category_id'] : null;
-        if ($categoryId !== null && !isset($validCategoryIds[$categoryId])) {
-            $this->logger->warn("Auction {$auctionNum} lot {$sourceLotId}: category_id={$categoryId} not found in target — setting NULL.");
-            $categoryId = null;
+        $sourceCategoryId = $row['category_id'] !== null ? (int) $row['category_id'] : null;
+        $categoryId = $sourceCategoryId !== null ? $map->getCategory($sourceCategoryId) : null;
+        if ($sourceCategoryId !== null && $categoryId === null) {
+            $this->logger->warn("Auction {$auctionNum} lot {$sourceLotId}: source category_id={$sourceCategoryId} has no target mapping — setting NULL.");
         }
 
         $currentBidderId = $row['current_winner_id'] !== null ? (int) $row['current_winner_id'] : null;
