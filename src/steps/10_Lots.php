@@ -9,6 +9,11 @@ declare(strict_types=1);
  * from 1), so new target IDs are assigned and recorded in
  * _migration_lot_map for step 11 (Bids) to resolve.
  *
+ * `inv.list_order` maps directly to the target's `lots.sort_order`
+ * (added 2026-08-12 for the staggered-lot-closing feature) — it's the
+ * authoritative operator-controlled lot sequence within an auction, not
+ * inferred from `lot_number` (a free-text label, not reliably sortable).
+ *
  * Processed in chunks of BATCH_SIZE — not a single transaction — per
  * PROJECT.md architecture notes.
  */
@@ -94,13 +99,13 @@ class Step10Lots implements StepInterface
 
         $insertLotStmt = $target->prepare(
             'INSERT INTO lots (
-                auction_id, tenant_id, lot_number, title, description,
+                auction_id, tenant_id, lot_number, sort_order, title, description,
                 category_id, starting_bid, reserve_price, current_bid,
                 current_bidder_id, bid_count, closes_at, extended_closes_at,
                 status, soft_close_enabled, soft_close_minutes,
                 created_at, updated_at
              ) VALUES (
-                :auction_id, :tenant_id, :lot_number, :title, :description,
+                :auction_id, :tenant_id, :lot_number, :sort_order, :title, :description,
                 :category_id, :starting_bid, :reserve_price, :current_bid,
                 :current_bidder_id, :bid_count, :closes_at, :extended_closes_at,
                 :status, 1, :soft_close_minutes,
@@ -114,7 +119,8 @@ class Step10Lots implements StepInterface
 
         while (true) {
             $sql = "SELECT
-                        inv.ID AS inv_id, inv.lot_number AS lot_number, inv.description AS description,
+                        inv.ID AS inv_id, inv.lot_number AS lot_number, inv.list_order AS list_order,
+                        inv.description AS description,
                         inv.additional_desc AS additional_desc, inv.primary_category_id AS category_id,
                         inv.min_bid AS min_bid, inv.item_reserve AS item_reserve,
                         inv.photo_string AS photo_string, inv.premium AS premium,
@@ -245,6 +251,7 @@ class Step10Lots implements StepInterface
             'auction_id' => $auctionNum,
             'tenant_id' => $this->config->tenantId,
             'lot_number' => $row['lot_number'],
+            'sort_order' => (int) $row['list_order'],
             'title' => $title,
             'description' => $description,
             'category_id' => $categoryId,
