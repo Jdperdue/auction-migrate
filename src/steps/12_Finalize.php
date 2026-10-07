@@ -8,6 +8,14 @@ declare(strict_types=1);
  * docs/migration-renebates.md "Post-Migration Verification Queries".
  * Does not drop _migration_lot_map — per PROJECT.md, that happens
  * manually once the operator is satisfied with verification results.
+ *
+ * Scoped to status = 'closed' lots only (added 2026-10-07): `bids.is_winning`
+ * legitimately means "currently the leading bid" and gets set by step 11 for
+ * lots that are still open (matching live app semantics in BidService), but
+ * `lots.winning_bid_id` means a confirmed, closed-lot winner — read without a
+ * status check by InvoiceGenerationService and LotPaymentController. Copying
+ * it onto an open lot would make that lot invoiceable/payable before it has
+ * actually closed.
  */
 class Step12Finalize implements StepInterface
 {
@@ -26,16 +34,16 @@ class Step12Finalize implements StepInterface
         $result->processed = 1;
 
         if ($dryRun) {
-            $this->logger->dryRun('Would UPDATE lots.winning_bid_id from bids WHERE is_winning = 1.');
+            $this->logger->dryRun("Would UPDATE lots.winning_bid_id from bids WHERE is_winning = 1 AND lots.status = 'closed'.");
         } else {
             $stmt = $target->exec(
-                'UPDATE lots l
+                "UPDATE lots l
                  JOIN bids b ON b.lot_id = l.id AND b.is_winning = 1
                  SET l.winning_bid_id = b.id
-                 WHERE l.winning_bid_id IS NULL'
+                 WHERE l.winning_bid_id IS NULL AND l.status = 'closed'"
             );
             $result->inserted = (int) $stmt;
-            $this->logger->info("Set winning_bid_id on {$result->inserted} lot(s).");
+            $this->logger->info("Set winning_bid_id on {$result->inserted} closed lot(s).");
         }
 
         $this->verifyCounts($source, $target);

@@ -16,6 +16,15 @@ declare(strict_types=1);
  *
  * Processed in chunks of BATCH_SIZE — not a single transaction — per
  * PROJECT.md architecture notes.
+ *
+ * After an auction's lots are inserted, derives `auctions.lot_closing_starts_at`
+ * (earliest lot close time) and `lot_closing_interval_minutes` (average spacing
+ * between lot close times) from the migrated `closes_at` values, so legacy
+ * auctions carry a "closing begins at" time matching how they actually closed
+ * (added 2026-10-07). Lot `status` is set from whether the source workspace has
+ * actually ended (`workspaceStatus` ∈ {ended, closed}), not merely from the
+ * presence of a current leading bidder — `current_winner_id` on a still-open
+ * source lot is just the current high bid, not a confirmed sale.
  */
 class Step10Lots implements StepInterface
 {
@@ -96,6 +105,9 @@ class Step10Lots implements StepInterface
 
         $batchSize = $this->config->batchSize;
         $offset = 0;
+        $minEndTime = null;
+        $maxEndTime = null;
+        $endTimeCount = 0;
 
         $insertLotStmt = $target->prepare(
             'INSERT INTO lots (
@@ -157,6 +169,16 @@ class Step10Lots implements StepInterface
                         $insertLotStmt,
                         $insertImageStmt
                     );
+
+                    if ($row['end_time'] !== null && $row['end_time'] !== '0000-00-00 00:00:00') {
+                        $endTimeCount++;
+                        if ($minEndTime === null || $row['end_time'] < $minEndTime) {
+                            $minEndTime = $row['end_time'];
+                        }
+                        if ($maxEndTime === null || $row['end_time'] > $maxEndTime) {
+                            $maxEndTime = $row['end_time'];
+                        }
+                    }
                 }
 
                 if (!$dryRun) {
@@ -177,6 +199,28 @@ class Step10Lots implements StepInterface
             }
 
             $offset += $batchSize;
+        }
+
+        if (!$dryRun && $endTimeCount >= 2 && $minEndTime !== $maxEndTime) {
+            $spanSeconds = strtotime($maxEndTime) - strtotime($minEndTime);
+            $intervalMinutes = max(1, (int) round($spanSeconds / 60 / ($endTimeCount - 1)));
+
+            $target->prepare(
+                'UPDATE auctions SET lot_closing_starts_at = :starts_at, lot_closing_interval_minutes = :interval
+                 WHERE id = :id'
+            )->execute([
+                'starts_at' => $minEndTime,
+                'interval' => $intervalMinutes,
+                'id' => $auctionNum,
+            ]);
+
+            $this->logger->info("Auction {$auctionNum}: lot_closing_starts_at={$minEndTime}, lot_closing_interval_minutes={$intervalMinutes} (derived from {$endTimeCount} legacy lot close times).");
+        } elseif (!$dryRun && $endTimeCount === 1) {
+            $target->prepare(
+                'UPDATE auctions SET lot_closing_starts_at = :starts_at WHERE id = :id'
+            )->execute(['starts_at' => $minEndTime, 'id' => $auctionNum]);
+
+            $this->logger->info("Auction {$auctionNum}: lot_closing_starts_at={$minEndTime} (single lot, interval left NULL).");
         }
     }
 
@@ -220,14 +264,21 @@ class Step10Lots implements StepInterface
             $this->logger->info("Auction {$auctionNum} lot {$sourceLotId}: source premium override ({$premium}) has no target field — recorded in log only.");
         }
 
+        // `current_winner_id` is the *current leading bidder* on a source lot,
+        // not necessarily a confirmed sale — a lot can have a leading bid while
+        // its auction (and that lot's own closes_at) is still well in the
+        // future. Whether the lot has actually ended must be checked first;
+        // only then does presence of a bidder decide closed vs. no_sale.
+        $hasEnded = in_array($workspaceStatus, ['ended', 'closed'], true);
+
         if ((int) $row['is_halted'] === 1) {
             $status = 'pending';
+        } elseif (!$hasEnded) {
+            $status = 'open';
         } elseif ($currentBidderId !== null) {
             $status = 'closed';
-        } elseif ($workspaceStatus === 'closed') {
-            $status = 'closed';
         } else {
-            $status = 'open';
+            $status = 'no_sale';
         }
 
         $title = (string) $row['description'];
